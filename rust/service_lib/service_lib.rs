@@ -1,11 +1,13 @@
 #![allow(dead_code, unused_variables)]
 
-pub mod service_lib {
+
+pub mod service {
     use custom_action::CustomAction;
 
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
     use tokio::sync::Mutex as AsyncMutex;
+    use colored::*;
 
     pub struct BackgroundService {
         actions: Arc<AsyncMutex<Vec<CustomAction>>>,
@@ -35,7 +37,7 @@ pub mod service_lib {
                 // Collect only usable actions first
                 let mut actions_to_run: Vec<CustomAction> = Vec::new();
                 for action in actions.iter_mut() {
-                    if action.usable {
+                    if action.get_usable() {
                         action.update(); // Update before execution
                         actions_to_run.push(action.clone()); // Clone only usable actions
                     }
@@ -45,7 +47,7 @@ pub mod service_lib {
                 // Spawn tasks outside the lock
                 for action in actions_to_run {
                     tokio::task::spawn(async move {
-                        (action.action)();
+                        action.run();
                     });
                 }
                 
@@ -55,7 +57,7 @@ pub mod service_lib {
                 if self.interval > elapsed {
                     tokio::time::sleep(self.interval - elapsed).await;
                 }
-                
+
                 // Check if we need to stop
                 let stop_signal = self.stop_signal.lock().await;
                 if *stop_signal {
@@ -74,42 +76,63 @@ pub mod service_lib {
             *stop_signal = false;
         }
 
-        pub async fn add_action(&self, mut action: CustomAction) {
+        pub async fn add_action(&self, mut action: CustomAction) { 
             let mut actions = self.actions.lock().await;
             action.set_id(actions.len() as u64 + 1);
             actions.push(action);
+        }
+        
+        pub async fn status(&self) {
+            let mut actions = self.actions.lock().await;
+
+            for action in actions.iter_mut() {
+                let id = action.get_id();
+                let status = if action.get_usable() { 
+                    "Active".bold().green()
+                } else { 
+                    "Unactive".bold().red()
+                };
+                let repeat = std::cmp::min(action.repeats(), 999_999_999);
+
+                println!("Action {id} - {status} \n  Repeats - {repeat}");
+            }
         }
     }
 
     
     pub mod custom_action {
+        // libs
         use std::sync::Arc;
 
+        // custom type for async action
         type AsyncAction = Arc<dyn Fn() + Send + Sync>;
 
         // ARS - Action Repeat State
         #[derive(Clone)]
-        enum Ars {
+        pub enum Ars {
             Inf,
             Normal,
             Ended,
         }
+
+        // Repeat save how much times the action repeat on self
         #[derive(Clone)]
         pub struct Repeat {
             times: u32,
             current: u32,
             state: Ars,
         }
+        // builders
         impl Repeat {
-            fn new(times: u32) -> Self {
+            pub fn new(times: u32) -> Self {
                 Self {
                     times,
                     current: 0,
                     state: Ars::Normal,
                 }
             }
-          
-            fn inf() -> Self {
+        
+            pub fn inf() -> Self {
                 Self {
                     times: 0,
                     current: 0,
@@ -117,65 +140,155 @@ pub mod service_lib {
                 }
             }
         }
+        // getters
+        impl Repeat {
+            pub fn get_times(&self) -> u32 {
+                self.times
+            }
+
+            pub fn get_current(&self) -> u32 {
+                self.current
+            }
+
+            pub fn get_state(&self) -> &Ars {
+                &self.state
+            }
+            pub fn set_state(&mut self, ars: Ars) {
+                self.state = ars;
+            }
+        }
+        // others
         impl Repeat {
             fn count(&mut self) {
                 self.current = self.current.saturating_add(1);
             }
 
-            fn ended(&mut self) -> bool {
-                match self.state {
-                    Ars::Inf => return false,
-                    _ => {
-                        if self.times < self.current + 1  {
-                            self.state = Ars::Ended;
-                            return true;
-                        }
-                        return false;
+            fn ended(&mut self) {
+                if let Ars::Normal = self.state {
+                    if self.current + 1 >= self.times {
+                        self.state = Ars::Ended;
                     }
                 }
             }
+        
+            pub fn update (&mut self) {
+                self.count();
+                self.ended();
+            }
         }
 
+
+        // the info about the action and it self
         #[derive(Clone)]
         pub struct CustomAction {
-            pub action: AsyncAction,
-            pub repeats: Repeat,
-            pub id: u64,
+            name: String,
+            description: String,
 
-            pub usable: bool,
+            action: AsyncAction,
+            repeats: Repeat,
+            id: u64,
+
+            usable: bool,
+            unusable: String,
         }
+        // init
         impl CustomAction {
             pub fn new<F>(action: F, repeats: Option<u32>) -> Self
             where
                 F: Fn() + Send + Sync + 'static,
             {
                 Self {
+                    name: "a".to_string(),
+                    description: "a function".to_string(),
+
                     action: Arc::new(action),
-                    repeats: match repeats {
-                        Some(r) => Repeat::new(r),
-                        None => Repeat::inf(),
-                    },
+                    repeats: repeats.map_or_else(Repeat::inf, Repeat::new),
                     id: 0,
 
                     usable: true,
+                    unusable: "e".to_string(),
                 }
             }
-
-            pub fn update (&mut self) {
-                self.repeats.count();
-                if self.repeats.ended() {
-                    self.usable = false;
-                }
-
-                //print!("usable is: {:?}", self.usable);
+        }
+        // geters + setters
+        impl CustomAction {
+            // Getter for name
+            pub fn get_name(&self) -> &String {
+                &self.name
+            }
+            // Setter for name
+            pub fn set_name(&mut self, name: String) {
+                self.name = name;
             }
 
+            // Getter for description
+            pub fn get_description(&self) -> &String {
+                &self.description
+            }
+            // Setter for description
+            pub fn set_description(&mut self, description: String) {
+                self.description = description;
+            }
+
+            // Setter for ID
+            pub fn get_id(&self) -> u64 {
+                self.id
+            }
+            // Setter for ID
             pub fn set_id(&mut self, id: u64) {
                 self.id = id;
             }
-            pub fn get_id(&self) -> u64 {
-                return self.id;
+
+            // Getter for usable status
+            pub fn get_usable(&self) -> bool {
+                self.usable
+            }
+            // Setter for usable status
+            pub fn set_usable(&mut self, usable: bool) {
+                self.usable = usable;
+            }
+
+            // Getter for unusable
+            pub fn get_unusable(&self) -> &String {
+                &self.unusable
+            }
+            // Setter for unusable
+            pub fn set_unusable(&mut self, unusable: String) {
+                self.unusable = unusable;
             }
         }
+        // others
+        impl CustomAction {
+            pub fn update (&mut self) {
+                self.repeats.update();
+
+                if let Ars::Ended = self.repeats.state {
+                    self.usable = false;
+                    self.unusable = "Run out of repeats".to_string();
+                }
+            }
+            pub fn run(&self) {
+                (self.action)();
+            }
+
+            pub fn repeats(&self) -> u32 {
+                self.repeats.get_current()
+            }
+            pub fn repeats_left(&self) -> u32 {
+                let left = self.repeats.get_times() as i32 - self.repeats.get_current() as i32;
+
+                if left < 0 {
+                    999_999_999
+                } else {
+                    left as u32 // Convert back if needed
+                }
+                
+            }
+            pub fn repeats_state(&self) -> &Ars {
+                &self.repeats.get_state()
+            }
+            
+        }
     }
+    
 }
