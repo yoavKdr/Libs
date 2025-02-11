@@ -65,12 +65,10 @@ pub mod service {
                 }
             }
         }
-
         pub async fn stop(&self) {
             let mut stop_signal = self.stop_signal.lock().await;
             *stop_signal = true;
         }
-
         pub async fn unstop(&self) {
             let mut stop_signal = self.stop_signal.lock().await;
             *stop_signal = false;
@@ -81,20 +79,26 @@ pub mod service {
             action.set_id(actions.len() as u64 + 1);
             actions.push(action);
         }
+        pub async fn find_action_by_id(&self, id: u64) -> Option<CustomAction> {
+            let actions = self.actions.lock().await;
+            actions.iter().find(|action| action.get_id() == id).cloned()
+        }
+        pub async fn find_action_by_name(&self, name: &str) -> Option<CustomAction> {
+            let actions = self.actions.lock().await;
+            actions.iter().find(|action| action.get_name() == name).cloned()
+        }
         
         pub async fn status(&self) {
             let mut actions = self.actions.lock().await;
 
             for action in actions.iter_mut() {
-                let id = action.get_id();
                 let status = if action.get_usable() { 
                     "Active".bold().green()
                 } else { 
                     "Unactive".bold().red()
                 };
-                let repeat = std::cmp::min(action.repeats(), 999_999_999);
 
-                println!("Action {id} - {status} \n  Repeats - {repeat}");
+                println!("{} ({}) - {status}", action.get_name(), action.get_id());
             }
         }
     }
@@ -165,7 +169,7 @@ pub mod service {
 
             fn ended(&mut self) {
                 if let Ars::Normal = self.state {
-                    if self.current + 1 >= self.times {
+                    if self.current >= self.times {
                         self.state = Ars::Ended;
                     }
                 }
@@ -177,6 +181,57 @@ pub mod service {
             }
         }
 
+        pub struct CustomActionBuilder<F>
+        where
+            F: Fn() + Send + Sync + 'static,
+        {
+            name: String,
+            description: String,
+            action: Arc<F>,
+            repeats: Option<u32>,
+        }
+
+        impl<F> CustomActionBuilder<F>
+        where
+            F: Fn() + Send + Sync + 'static,
+        {
+            pub fn new(action: F) -> Self {
+                Self {
+                    name: "Action".to_string(),
+                    description: "Null".to_string(),
+                    action: Arc::new(action),
+                    repeats: None,
+                }
+            }
+
+            pub fn name(mut self, name: &str) -> Self {
+                self.name = name.to_string();
+                self
+            }
+
+            pub fn description(mut self, description: &str) -> Self {
+                self.description = description.to_string();
+                self
+            }
+
+            pub fn repeats(mut self, repeats: u32) -> Self {
+                self.repeats = Some(repeats);
+                self
+            }
+
+            pub fn build(self) -> CustomAction {
+                CustomAction {
+                    name: self.name,
+                    description: self.description,
+                    action: self.action,
+                    repeats: self.repeats.map_or_else(Repeat::inf, Repeat::new),
+
+                    id: 0,
+                    usable: true,
+                    unusable: "Usable".to_string(),
+                }
+            }
+        }
 
         // the info about the action and it self
         #[derive(Clone)]
@@ -190,25 +245,6 @@ pub mod service {
 
             usable: bool,
             unusable: String,
-        }
-        // init
-        impl CustomAction {
-            pub fn new<F>(action: F, repeats: Option<u32>) -> Self
-            where
-                F: Fn() + Send + Sync + 'static,
-            {
-                Self {
-                    name: "a".to_string(),
-                    description: "a function".to_string(),
-
-                    action: Arc::new(action),
-                    repeats: repeats.map_or_else(Repeat::inf, Repeat::new),
-                    id: 0,
-
-                    usable: true,
-                    unusable: "e".to_string(),
-                }
-            }
         }
         // geters + setters
         impl CustomAction {
@@ -272,7 +308,7 @@ pub mod service {
             }
 
             pub fn repeats(&self) -> u32 {
-                self.repeats.get_current()
+                std::cmp::min(self.repeats.get_current() , 999_999_999)
             }
             pub fn repeats_left(&self) -> u32 {
                 let left = self.repeats.get_times() as i32 - self.repeats.get_current() as i32;
@@ -287,7 +323,7 @@ pub mod service {
             pub fn repeats_state(&self) -> &Ars {
                 &self.repeats.get_state()
             }
-            
+
         }
     }
     
